@@ -1,0 +1,154 @@
+import pandas as pd
+from docxtpl import DocxTemplate
+from docx2pdf import convert
+import os
+import time
+
+
+# CONFIGURAÇÕES -> caminho da base de dados e dos modelos de docx(Word), o modelo deve conter campos especificados com {{}} para leitura da biblioteca
+
+EXCEL = r"C:\Users\TH789225\OneDrive - Oi Corp\Documents\FORMULÁRIO HB - ARACAJU.xlsx"
+MODELO_ENTREGA = r"C:\AutomacaoTermos\modelo_entrega.docx"
+MODELO_DEVOLUCAO = r"C:\AutomacaoTermos\modelo_devolucao.docx"
+PASTA_SAIDA = r"\\DSKCCWKSE092228\TermosAJU"
+ABA = "leitura_python"
+
+INTERVALO_SEGUNDOS = 20  # tempo de atualização do looping
+
+
+# CONTROLE DE PROCESSADOS -> evita que os arquivos da base de dados sejam processados no looping de verificação
+
+
+ARQUIVO_CONTROLE = r"C:\AutomacaoTermos\processados.txt"
+
+
+def carregar_processados():
+    if not os.path.exists(ARQUIVO_CONTROLE):
+        return set()
+    with open(ARQUIVO_CONTROLE, "r") as f:
+        return set(line.strip() for line in f.readlines())
+
+
+def salvar_processado(id_linha):
+    with open(ARQUIVO_CONTROLE, "a") as f:
+        f.write(str(id_linha) + "\n")
+
+# FUNÇÕES AUXILIARES -> validação caso algum campo esteja faltando, será incluido GENÉRICO.
+
+def safe(value, default="GENÉRICO"):
+    if pd.isna(value) or str(value).strip() == "":
+        return default
+    try:
+        return str(int(float(value)))
+    except:
+        return str(value).strip()
+
+
+def format_date(value):
+    try:
+        if pd.isna(value):
+            return "GENÉRICO"
+        dt = pd.to_datetime(value)
+        return dt.strftime("%d/%m/%Y")
+    except:
+        return str(value)
+
+
+
+# LOOP INFINITO (MONITORAMENTO) -> a automação roda automaticamente em looping infinito em busca de novos dados
+
+print("Sistema iniciado... monitorando novas respostas.")
+
+while True:
+
+    try:
+
+        # LÊ EXCEL DO FORMS -> leitura do forms
+
+        df = pd.read_excel(EXCEL, sheet_name=ABA, engine="openpyxl")
+        processados = carregar_processados()
+
+        # PERCORRE LINHAS
+
+        for index, row in df.iterrows():
+
+            # ID único da linha
+            id_linha = f"{row['matricula']}_{row['serial']}_{row['data']}"
+
+            # se já processado, pula
+            if id_linha in processados:
+                continue
+
+
+            # VALIDAÇÃO DA MATRÍCULA -> a automação não emite termos com matrículas não encontradas na base -> verificar se base está atualizada
+
+            matricula = safe(row.get("matricula"))
+
+            if not matricula.isdigit():
+                print(f"AVISO → Matrícula inválida na linha {index}: '{matricula}' — pulando.")
+                continue
+
+            # DEFINE TIPO DE MODELO -> baseado na resposta do forms
+
+
+            tipo = safe(row.get("tipo_atendimento")).lower()
+
+            if tipo == "entrega":
+                doc = DocxTemplate(MODELO_ENTREGA)
+            elif tipo in ["devolução", "devolucao"]:
+                doc = DocxTemplate(MODELO_DEVOLUCAO)
+            else:
+                doc = DocxTemplate(MODELO_ENTREGA)
+
+            # CAMPOS -> baseado no modelo word
+
+            hostname = safe(row.get("hostname"))
+
+            contexto = {
+                "nome_completo": safe(row.get("nome_completo")),
+                "matricula": matricula,
+                "tipo_de_kit": safe(row.get("tipo_de_kit")),
+                "modelo": safe(row.get("modelo")),
+                "serial": safe(row.get("serial")),
+                "hostname": hostname,
+                "data": format_date(row.get("data")),
+                "data_extenso": safe(row.get("data_extenso")),
+                "tipo_atendimento": safe(row.get("tipo_atendimento")),
+                "responsavel": safe(row.get("responsavel"), "")
+            }
+
+            # PREENCHE MODELO
+
+            doc.render(contexto)
+
+            # NOME DO ARQUIVO -> nome especifico conforme politicas da empresa
+
+            data_formatada = format_date(row.get("data")).replace("/", "-")
+
+            nome_arquivo = (
+                f"{contexto['matricula']} - "
+                f"{contexto['nome_completo']} - "
+                f"{hostname} - "
+                f"{contexto['serial']} - "
+                f"{data_formatada}"
+            )
+
+            caminho_docx = os.path.join(PASTA_SAIDA, f"{nome_arquivo}.docx")
+            caminho_pdf = os.path.join(PASTA_SAIDA, f"{nome_arquivo}.pdf")
+
+            # SALVA E CONVERTE
+
+            doc.save(caminho_docx)
+            convert(caminho_docx, caminho_pdf)
+            os.remove(caminho_docx)
+
+            # marca como processado -> evita que seja processado novamente
+            salvar_processado(id_linha)
+
+            print(f"OK → {nome_arquivo}")
+
+    except Exception as e:
+        print(f"ERRO no loop: {e}")
+
+    # espera antes de rodar novamente
+    time.sleep(INTERVALO_SEGUNDOS)
